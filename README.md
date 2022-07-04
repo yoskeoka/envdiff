@@ -1,6 +1,12 @@
 # envdiff
 envfile diff tool
 
+## Installation
+
+```sh
+go install github.com/yoskeoka/envdiff@latest
+```
+
 ## Usage
 
 Print environment variables that the file2 contains more.
