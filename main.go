@@ -62,7 +62,7 @@ func mainRealm() int {
 	}
 
 	for _, item := range d {
-		fmt.Printf("%s=%v", item.Key, item.Val)
+		fmt.Println(item)
 	}
 
 	return 1
@@ -72,6 +72,10 @@ func mainRealm() int {
 type EnvVar struct {
 	Key string
 	Val string
+}
+
+func (ev EnvVar) String() string {
+	return fmt.Sprintf("%s=%v", ev.Key, ev.Val)
 }
 
 func ReadEnvFile(file io.Reader) ([]EnvVar, error) {
