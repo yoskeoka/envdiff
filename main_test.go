@@ -9,8 +9,9 @@ import (
 
 func TestDiff(t *testing.T) {
 	type args struct {
-		a []EnvVar
-		b []EnvVar
+		a    []EnvVar
+		b    []EnvVar
+		opts []DiffOption
 	}
 	tests := []struct {
 		name string
@@ -22,6 +23,7 @@ func TestDiff(t *testing.T) {
 			args: args{
 				[]EnvVar{{"ENV1", "KEY1"}},
 				[]EnvVar{{"ENV1", "KEY1"}},
+				[]DiffOption{},
 			},
 			want: []EnvVar{},
 		},
@@ -35,6 +37,7 @@ func TestDiff(t *testing.T) {
 				[]EnvVar{
 					{"ENV1", "KEY1"},
 				},
+				[]DiffOption{},
 			},
 			want: []EnvVar{},
 		},
@@ -46,15 +49,32 @@ func TestDiff(t *testing.T) {
 					{"ENV1", "KEY1"},
 					{"ENV2", "KEY2"},
 				},
+				[]DiffOption{},
 			},
 			want: []EnvVar{
 				{"ENV2", "KEY2"},
 			},
 		},
+		{name: "b has diff value",
+			args: args{
+				[]EnvVar{
+					{"ENV1", "KEY1"},
+					{"ENV2", "KEY2"},
+				},
+				[]EnvVar{
+					{"ENV1", "KEY1"},
+					{"ENV2", "KEY33"},
+				},
+				[]DiffOption{DiffOptionCompareValue(true)},
+			},
+			want: []EnvVar{
+				{"ENV2", "KEY33"},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Diff(tt.args.a, tt.args.b)
+			got := Diff(tt.args.a, tt.args.b, tt.args.opts...)
 			sortEnvVar(tt.want)
 			sortEnvVar(got)
 

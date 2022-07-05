@@ -18,19 +18,22 @@ func main() {
 
 func mainRealm() int {
 	fs := flag.NewFlagSet("envdiff", flag.ExitOnError)
-	err := fs.Parse(os.Args)
+
+	compareValue := fs.Bool("cmpval", false, "compare value (default: off)")
+
+	err := fs.Parse(os.Args[1:])
 	if err != nil {
 		return 1
 	}
 
-	if len(fs.Args()) < 3 {
+	if len(fs.Args()) < 2 {
 		fs.Usage()
 		fmt.Println("Example: envdiff envfile1 envfile2")
 		return 1
 	}
 
-	file1name := fs.Arg(1)
-	file2name := fs.Arg(2)
+	file1name := fs.Arg(0)
+	file2name := fs.Arg(1)
 
 	file1, err := os.Open(file1name)
 	if err != nil {
@@ -55,7 +58,9 @@ func mainRealm() int {
 		return 1
 	}
 
-	d := Diff(evf1, evf2)
+	d := Diff(evf1, evf2,
+		DiffOptionCompareValue(*compareValue),
+	)
 
 	if len(d) == 0 {
 		return 0
@@ -125,16 +130,49 @@ func sortEnvVar(list []EnvVar) {
 	})
 }
 
-func Diff(a, b []EnvVar) []EnvVar {
+type diffOpts struct {
+	CompareValue bool
+}
+
+func newDiffOpts(opts []DiffOption) diffOpts {
+	do := diffOpts{}
+	for _, o := range opts {
+		o(&do)
+	}
+	return do
+}
+
+type DiffOption func(*diffOpts)
+
+func DiffOptionCompareValue(cmp bool) DiffOption {
+	return func(do *diffOpts) {
+		do.CompareValue = cmp
+	}
+}
+
+func Diff(a, b []EnvVar, opts ...DiffOption) []EnvVar {
+
+	dopts := newDiffOpts(opts)
+
 	am := listToMap(a)
 	bm := listToMap(b)
 
 	d := make([]EnvVar, 0, len(b))
 
 	for bk, bv := range bm {
-		if _, aHasB := am[bk]; !aHasB {
+		av, aHasB := am[bk]
+		if !aHasB {
+			d = append(d, EnvVar{Key: bk, Val: bv})
+			continue
+		}
+
+		if dopts.CompareValue && !compareEnvVar(av, bv, dopts) {
 			d = append(d, EnvVar{Key: bk, Val: bv})
 		}
 	}
 	return d
+}
+
+func compareEnvVar(av, bv string, opts diffOpts) bool {
+	return av == bv
 }
