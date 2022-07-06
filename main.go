@@ -12,6 +12,11 @@ import (
 	"strings"
 )
 
+var (
+	version   string = "installed via go install"
+	gitCommit string = "unknown"
+)
+
 func main() {
 	code := mainRealm()
 	os.Exit(code)
@@ -20,6 +25,7 @@ func main() {
 func mainRealm() int {
 	fset := flag.NewFlagSet("envdiff", flag.ExitOnError)
 
+	printVer := fset.Bool("version", false, "Print version.")
 	check := fset.Bool("check", false, "If the result has diff, it exits with code 1.")
 
 	compareValue := fset.Bool("cmpval", false, "compare value (default: off)")
@@ -46,6 +52,11 @@ func mainRealm() int {
 	err := fset.Parse(os.Args[1:])
 	if err != nil {
 		return 1
+	}
+
+	if *printVer {
+		printVersion(fset.Output())
+		return 0
 	}
 
 	if len(fset.Args()) < 2 {
@@ -109,6 +120,11 @@ func mainRealm() int {
 	}
 
 	return 0
+}
+
+func printVersion(output io.Writer) {
+	fmt.Fprintf(output, "Version: %s\n", version)
+	fmt.Fprintf(output, "Git commit: %s\n", gitCommit)
 }
 
 func WildcardToRegexStr(wc string) string {
