@@ -20,6 +20,8 @@ func main() {
 func mainRealm() int {
 	fset := flag.NewFlagSet("envdiff", flag.ExitOnError)
 
+	check := fset.Bool("check", false, "If the result has diff, it exits with code 1.")
+
 	compareValue := fset.Bool("cmpval", false, "compare value (default: off)")
 	var filterPatterns []*regexp.Regexp
 	fset.Func("filter", `Filter by env key pattern. Multi filters may be specified. e.g: -filter="KEY_*"`, func(v string) error {
@@ -102,7 +104,11 @@ func mainRealm() int {
 		fmt.Println(item)
 	}
 
-	return 1
+	if *check {
+		return 1
+	}
+
+	return 0
 }
 
 func WildcardToRegexStr(wc string) string {
