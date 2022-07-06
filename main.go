@@ -31,6 +31,16 @@ func mainRealm() int {
 		return nil
 	})
 
+	var ignorePatterns []*regexp.Regexp
+	fset.Func("ignore", `Ignore by env key pattern. Multi ignores may be specified. e.g: -ignore="FOO_*"`, func(v string) error {
+		re, err := regexp.Compile(WildcardToRegexStr(v))
+		if err != nil {
+			return err
+		}
+		ignorePatterns = append(ignorePatterns, re)
+		return nil
+	})
+
 	err := fset.Parse(os.Args[1:])
 	if err != nil {
 		return 1
@@ -44,6 +54,12 @@ func mainRealm() int {
 
 	file1name := fset.Arg(0)
 	file2name := fset.Arg(1)
+
+	// catch remaining flags
+	err = fset.Parse(fset.Args()[2:])
+	if err != nil {
+		return 1
+	}
 
 	file1, err := os.Open(file1name)
 	if err != nil {
@@ -69,7 +85,9 @@ func mainRealm() int {
 	}
 
 	evf1 = filterEnvVar(evf1, filterPatterns)
+	evf1 = ignoreEnvVar(evf1, ignorePatterns)
 	evf2 = filterEnvVar(evf2, filterPatterns)
+	evf2 = ignoreEnvVar(evf2, ignorePatterns)
 
 	d := Diff(evf1, evf2,
 		DiffOptionCompareValue(*compareValue),
@@ -169,7 +187,22 @@ func filterEnvVar(list []EnvVar, filterPatterns []*regexp.Regexp) []EnvVar {
 	return results
 }
 
+func ignoreEnvVar(list []EnvVar, ignorePatterns []*regexp.Regexp) []EnvVar {
+	results := make([]EnvVar, 0, len(list))
+	for _, v := range list {
+		if len(ignorePatterns) == 0 || !matchOr(v.Key, ignorePatterns) {
+			results = append(results, v)
+		}
+	}
+
+	return results
+}
+
 func matchOr(s string, patterns []*regexp.Regexp) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+
 	for _, re := range patterns {
 		if re.MatchString(s) {
 			return true
