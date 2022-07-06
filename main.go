@@ -48,6 +48,7 @@ func mainRealm() int {
 
 	if len(fset.Args()) < 2 {
 		fset.Usage()
+		fmt.Println()
 		fmt.Println("Example: envdiff envfile1 envfile2")
 		return 1
 	}
