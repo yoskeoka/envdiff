@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -17,23 +18,48 @@ func main() {
 }
 
 func mainRealm() int {
-	fs := flag.NewFlagSet("envdiff", flag.ExitOnError)
+	fset := flag.NewFlagSet("envdiff", flag.ExitOnError)
 
-	compareValue := fs.Bool("cmpval", false, "compare value (default: off)")
+	compareValue := fset.Bool("cmpval", false, "compare value (default: off)")
+	var filterPatterns []*regexp.Regexp
+	fset.Func("filter", `Filter by env key pattern. Multi filters may be specified. e.g: -filter="KEY_*"`, func(v string) error {
+		re, err := regexp.Compile(WildcardToRegexStr(v))
+		if err != nil {
+			return err
+		}
+		filterPatterns = append(filterPatterns, re)
+		return nil
+	})
 
-	err := fs.Parse(os.Args[1:])
+	var ignorePatterns []*regexp.Regexp
+	fset.Func("ignore", `Ignore by env key pattern. Multi ignores may be specified. e.g: -ignore="FOO_*"`, func(v string) error {
+		re, err := regexp.Compile(WildcardToRegexStr(v))
+		if err != nil {
+			return err
+		}
+		ignorePatterns = append(ignorePatterns, re)
+		return nil
+	})
+
+	err := fset.Parse(os.Args[1:])
 	if err != nil {
 		return 1
 	}
 
-	if len(fs.Args()) < 2 {
-		fs.Usage()
+	if len(fset.Args()) < 2 {
+		fset.Usage()
 		fmt.Println("Example: envdiff envfile1 envfile2")
 		return 1
 	}
 
-	file1name := fs.Arg(0)
-	file2name := fs.Arg(1)
+	file1name := fset.Arg(0)
+	file2name := fset.Arg(1)
+
+	// catch remaining flags
+	err = fset.Parse(fset.Args()[2:])
+	if err != nil {
+		return 1
+	}
 
 	file1, err := os.Open(file1name)
 	if err != nil {
@@ -58,6 +84,11 @@ func mainRealm() int {
 		return 1
 	}
 
+	evf1 = filterEnvVar(evf1, filterPatterns)
+	evf1 = ignoreEnvVar(evf1, ignorePatterns)
+	evf2 = filterEnvVar(evf2, filterPatterns)
+	evf2 = ignoreEnvVar(evf2, ignorePatterns)
+
 	d := Diff(evf1, evf2,
 		DiffOptionCompareValue(*compareValue),
 	)
@@ -71,6 +102,21 @@ func mainRealm() int {
 	}
 
 	return 1
+}
+
+func WildcardToRegexStr(wc string) string {
+	re := wc
+
+	// TODO: validate env var key valid chars + wildcard chars `?*`
+
+	// TODO: support standard wildcard
+
+	// replace
+	re = strings.ReplaceAll(re, "?", ".")
+	re = strings.ReplaceAll(re, "*", ".*")
+
+	re = "^" + re + "$"
+	return re
 }
 
 // EnvVar represents an environment variable.
@@ -128,6 +174,42 @@ func sortEnvVar(list []EnvVar) {
 	sort.SliceStable(list, func(i, j int) bool {
 		return list[i].Key < list[j].Key
 	})
+}
+
+func filterEnvVar(list []EnvVar, filterPatterns []*regexp.Regexp) []EnvVar {
+	results := make([]EnvVar, 0, len(list))
+	for _, v := range list {
+		if matchOr(v.Key, filterPatterns) {
+			results = append(results, v)
+		}
+	}
+
+	return results
+}
+
+func ignoreEnvVar(list []EnvVar, ignorePatterns []*regexp.Regexp) []EnvVar {
+	results := make([]EnvVar, 0, len(list))
+	for _, v := range list {
+		if len(ignorePatterns) == 0 || !matchOr(v.Key, ignorePatterns) {
+			results = append(results, v)
+		}
+	}
+
+	return results
+}
+
+func matchOr(s string, patterns []*regexp.Regexp) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+
+	for _, re := range patterns {
+		if re.MatchString(s) {
+			return true
+		}
+	}
+
+	return false
 }
 
 type diffOpts struct {

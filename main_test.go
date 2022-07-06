@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -117,6 +118,31 @@ func TestParseEnvLine(t *testing.T) {
 			}
 			if gotOk != tt.wantOk {
 				t.Errorf("ParseEnvLine() gotOk = %v, want %v", gotOk, tt.wantOk)
+			}
+		})
+	}
+}
+
+func TestWildcardToRegexStr(t *testing.T) {
+
+	tests := []struct {
+		wc   string
+		want string
+	}{
+		{"", `^$`},
+		{"*", `^.*$`},
+		{"?", `^.$`},
+		{"ab?", `^ab.$`},
+		{"FOO_*", `^FOO_.*$`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.wc, func(t *testing.T) {
+			got := WildcardToRegexStr(tt.wc)
+			if got != tt.want {
+				t.Errorf("WildcardToRegexStr() = %v, want %v", got, tt.want)
+			}
+			if _, regExErr := regexp.Compile(got); regExErr != nil {
+				t.Errorf("WildcardToRegexStr() returns an invalid regexp pattern: %s", got)
 			}
 		})
 	}
