@@ -53,3 +53,9 @@ KEY2=VAL2
 $ envdiff file1 file2
 KEY2=VAL2
 ```
+
+Update file1 with the diff.
+
+```sh
+envdiff file1 file2 >> file1
+```
