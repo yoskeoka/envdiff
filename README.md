@@ -24,6 +24,8 @@ Usage of envdiff:
         compare value (default: off)
   -filter value
         Filter by env key pattern. Multi filters may be specified. e.g: -filter="KEY_*"
+  -help
+        Print this help message.
   -ignore value
         Ignore by env key pattern. Multi ignores may be specified. e.g: -ignore="FOO_*"
   -version

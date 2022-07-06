@@ -26,6 +26,7 @@ func mainRealm() int {
 	fset := flag.NewFlagSet("envdiff", flag.ExitOnError)
 
 	printVer := fset.Bool("version", false, "Print version.")
+	printHelp := fset.Bool("help", false, "Print this help message.")
 	check := fset.Bool("check", false, "If the result has diff, it exits with code 1.")
 
 	compareValue := fset.Bool("cmpval", false, "compare value (default: off)")
@@ -59,7 +60,7 @@ func mainRealm() int {
 		return 0
 	}
 
-	if len(fset.Args()) < 2 {
+	if *printHelp || len(fset.Args()) < 2 {
 		fset.Usage()
 		fmt.Println()
 		fmt.Println("Example: envdiff envfile1 envfile2")
