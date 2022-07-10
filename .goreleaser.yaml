@@ -74,6 +74,7 @@ brews:
     tap:
       owner: yoskeoka
       name: homebrew-envdiff
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
 
     # Template for the url which is determined by the given Token (github, gitlab or gitea)
     #
