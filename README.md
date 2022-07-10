@@ -7,6 +7,13 @@ envfile diff tool
 go install github.com/yoskeoka/envdiff@latest
 ```
 
+### Homebrew
+
+```sh
+brew tap yoskeoka/envdiff
+brew install envdiff
+```
+
 ## Usage
 
 Print environment variables that the file2 contains more.
