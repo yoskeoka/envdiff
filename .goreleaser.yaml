@@ -85,7 +85,7 @@ brews:
     # to implement the strategy and add it to your tap repository.
     # Example: https://docs.brew.sh/Formula-Cookbook#specifying-the-download-strategy-explicitly
     # Default is empty.
-    download_strategy: CurlDownloadStrategy
+    # download_strategy: CurlDownloadStrategy
 
     # Allows you to add a custom require_relative at the top of the formula template
     # Default is empty
@@ -114,7 +114,7 @@ brews:
 
     # Template of your app's description.
     # Default is empty.
-    description: "envfile diff tool"
+    description: "This tool prints envfile diff"
 
     # SPDX identifier of your app's license.
     # Default is empty.
@@ -160,7 +160,7 @@ brews:
     # So you can `brew test` your formula.
     # Default is empty.
     test: |
-      system "#{bin}/envdiff -version"
+      system bin/"envdiff", "-version"
 
     # Custom install script for brew.
     # Default is 'bin.install "program"'.
