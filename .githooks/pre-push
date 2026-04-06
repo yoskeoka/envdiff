@@ -1,0 +1,10 @@
+#!/bin/bash
+# Pre-push hook: runs workflow linter in pre-push mode
+# All checks are warnings only (non-blocking)
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+LINTER="$REPO_ROOT/tools/workflow-lint.sh"
+
+if [ -x "$LINTER" ]; then
+    "$LINTER" --mode=pre-push
+fi

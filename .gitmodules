@@ -1,0 +1,3 @@
+[submodule ".claude/vendor/workflow"]
+	path = .claude/vendor/workflow
+	url = https://github.com/yoskeoka/vibe-coding-workspace.git
