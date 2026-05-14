@@ -22,6 +22,6 @@ docs/issues/      # Known issues
 This project follows the AI-Centered Development workflow defined in the parent workspace:
 
 1. **Spec first**: Update `docs/specs/` before changing code.
-2. **Plan first**: Non-trivial changes need an execution plan in `docs/exec-plan/todo/`.
-3. **Log issues**: Unrelated problems found during work go in `docs/issues/`.
+2. **Plan first**: Non-trivial changes need an execution plan in `docs/exec-plan/todo/`, using active filenames of the form `<sequence>-<name>.md`.
+3. **Log issues**: Unrelated problems found during work go in `docs/issues/` using active filenames of the form `<sequence>-<name>.md`.
 4. **PR for everything**: All changes go through GitHub PR review.
