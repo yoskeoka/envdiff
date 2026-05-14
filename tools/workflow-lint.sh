@@ -65,7 +65,15 @@ current_branch() {
 }
 
 active_workflow_filename_regex() {
-    echo '^([0-9]{4}|[1-9][0-9]{4,})-[a-z0-9]([a-z0-9-]*[a-z0-9])?\.md$'
+    echo '^((000[1-9])|(00[1-9][0-9])|(0[1-9][0-9]{2})|([1-9][0-9]{3,}))-[a-z0-9]([a-z0-9-]*[a-z0-9])?\.md$'
+}
+
+matching_exec_plan_files() {
+    local plan_name="$1"
+
+    find docs/exec-plan/todo docs/exec-plan/done -maxdepth 1 -type f \
+        \( -name "*-${plan_name}.md" -o -name "${plan_name}.md" \) \
+        | sort
 }
 
 resolve_exec_plan_paths() {
@@ -88,11 +96,7 @@ resolve_exec_plan_paths() {
                 fi
                 ;;
         esac
-    done < <(
-        find docs/exec-plan/todo docs/exec-plan/done -maxdepth 1 -type f \
-            \( -name "*-${plan_name}.md" -o -name "${plan_name}.md" \) \
-            | sort
-    )
+    done < <(matching_exec_plan_files "$plan_name")
 
     printf '%s|%s\n' "$todo_match" "$done_match"
 }
@@ -125,8 +129,50 @@ extract_linked_issue_paths_from_plan() {
 
         /^Addresses:/ {
             emit_paths($0)
+            collect = 1
+            next
+        }
+
+        collect && /^#{1,6}[[:space:]]/ {
+            collect = 0
+        }
+
+        collect && /^[^[:space:]#-].*:[[:space:]]*$/ {
+            collect = 0
+        }
+
+        collect {
+            emit_paths($0)
         }
     ' "$plan_file"
+}
+
+check_ambiguous_exec_plan_mapping() {
+    local branch="$1"
+    local plan_name="$2"
+    local todo_matches=0
+    local done_matches=0
+    local path=""
+
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        case "$path" in
+            docs/exec-plan/todo/*)
+                todo_matches=$((todo_matches + 1))
+                ;;
+            docs/exec-plan/done/*)
+                done_matches=$((done_matches + 1))
+                ;;
+        esac
+    done < <(matching_exec_plan_files "$plan_name")
+
+    if [ "$todo_matches" -gt 1 ] || [ "$done_matches" -gt 1 ]; then
+        emit_warning \
+            "fixable" \
+            "Ambiguous exec-plan mapping for branch '${branch}'" \
+            "Multiple active or completed exec-plans share the same '-${plan_name}.md' suffix, so workflow-lint cannot reliably tell which file the branch should map to." \
+            "Keep only one matching file per directory for suffix '${plan_name}.md' by renaming or removing the duplicate plan entry."
+    fi
 }
 
 pr_body_justifies_open_issue() {
@@ -397,6 +443,7 @@ check_exec_plan_existence() {
     fi
 
     local plan_name="${branch#*/}"
+    check_ambiguous_exec_plan_mapping "$branch" "$plan_name"
     local plan_paths
     local todo_file
     local done_file
