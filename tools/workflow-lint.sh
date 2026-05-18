@@ -113,6 +113,32 @@ current_exec_plan_paths() {
     resolve_exec_plan_paths "$plan_name"
 }
 
+current_github_repo_slug() {
+    local origin_url
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+
+    case "$origin_url" in
+        git@github.com:*.git)
+            origin_url="${origin_url#git@github.com:}"
+            origin_url="${origin_url%.git}"
+            printf '%s\n' "$origin_url"
+            ;;
+        git@github.com:*)
+            origin_url="${origin_url#git@github.com:}"
+            printf '%s\n' "$origin_url"
+            ;;
+        https://github.com/*.git)
+            origin_url="${origin_url#https://github.com/}"
+            origin_url="${origin_url%.git}"
+            printf '%s\n' "$origin_url"
+            ;;
+        https://github.com/*)
+            origin_url="${origin_url#https://github.com/}"
+            printf '%s\n' "$origin_url"
+            ;;
+    esac
+}
+
 extract_linked_issue_paths_from_plan() {
     local plan_file="$1"
 
@@ -143,6 +169,49 @@ extract_linked_issue_paths_from_plan() {
 
         collect {
             emit_paths($0)
+        }
+    ' "$plan_file"
+}
+
+extract_linked_github_issue_urls_from_plan() {
+    local plan_file="$1"
+
+    [ -f "$plan_file" ] || return
+
+    awk '
+        function is_addresses_continuation(line) {
+            return line ~ /^[[:space:]]*([-*][[:space:]]+)?https:\/\/github\.com\// \
+                || line ~ /^[[:space:]]*([-*][[:space:]]+)?`https:\/\/github\.com\//
+        }
+
+        function emit_urls(text) {
+            gsub(/`/, "", text)
+            while (match(text, /https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/issues\/[0-9]+/)) {
+                print substr(text, RSTART, RLENGTH)
+                text = substr(text, RSTART + RLENGTH)
+            }
+        }
+
+        /^Addresses:/ {
+            emit_urls($0)
+            collect = 1
+            next
+        }
+
+        collect && /^#{1,6}[[:space:]]/ {
+            collect = 0
+        }
+
+        collect && /^$/ {
+            collect = 0
+        }
+
+        collect && !is_addresses_continuation($0) {
+            collect = 0
+        }
+
+        collect {
+            emit_urls($0)
         }
     ' "$plan_file"
 }
@@ -189,6 +258,59 @@ pr_body_justifies_open_issue() {
 
         index($0, issue_file) && $0 ~ /(remain(s)? open|left open|stays open|intentionally open)/ {
             found = 1
+        }
+
+        END {
+            exit(found ? 0 : 1)
+        }
+    '
+}
+
+pr_body_closes_github_issue() {
+    local issue_url="$1"
+    local same_repo_ref="$2"
+
+    if [ "$MODE" != "ci" ] || [ -z "$PR_BODY" ]; then
+        return 1
+    fi
+
+    printf '%s\n' "$PR_BODY" | awk -v issue_url="$issue_url" -v same_repo_ref="$same_repo_ref" '
+        function regex_escape(text,    escaped) {
+            escaped = text
+            gsub(/[][(){}.^$*+?|\\-]/, "\\\\&", escaped)
+            return escaped
+        }
+
+        function line_closes_issue(line, escaped_issue_url, escaped_same_repo_ref, pattern) {
+            if (line !~ /(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[[:space:]]*/) {
+                return 0
+            }
+
+            pattern = escaped_issue_url "([^0-9]|$)"
+            if (line ~ pattern) {
+                return 1
+            }
+
+            if (escaped_same_repo_ref != "") {
+                pattern = escaped_same_repo_ref "([^0-9]|$)"
+                if (line ~ pattern) {
+                    return 1
+                }
+            }
+
+            return 0
+        }
+
+        BEGIN {
+            IGNORECASE = 1
+            escaped_issue_url = regex_escape(issue_url)
+            escaped_same_repo_ref = regex_escape(same_repo_ref)
+        }
+
+        {
+            if (line_closes_issue($0, escaped_issue_url, escaped_same_repo_ref)) {
+                found = 1
+            }
         }
 
         END {
@@ -554,6 +676,63 @@ check_linked_issue_resolution() {
 }
 
 # =============================================================================
+# Check 6a: Linked external GitHub issues declared in completed exec-plans
+# must appear in PR-body closing keywords unless intentionally left open.
+# Narrow scope: only the matching feat/* or fix/* branch, only after the plan
+# has moved to docs/exec-plan/done/, only for explicit GitHub issue URLs named
+# on an Addresses: line, and only in CI mode where PR body input exists.
+# =============================================================================
+check_linked_github_issue_closure() {
+    if [ "$MODE" != "ci" ] || [ -z "$PR_BODY" ]; then
+        return
+    fi
+
+    local plan_paths
+    plan_paths=$(current_exec_plan_paths)
+    [ -z "$plan_paths" ] && return
+
+    local done_plan_file="${plan_paths##*|}"
+
+    if [ ! -f "$done_plan_file" ]; then
+        return
+    fi
+
+    local linked_issue_urls
+    linked_issue_urls=$(extract_linked_github_issue_urls_from_plan "$done_plan_file")
+
+    if [ -z "$linked_issue_urls" ]; then
+        return
+    fi
+
+    local repo_slug
+    repo_slug=$(current_github_repo_slug)
+
+    local issue_url
+    while IFS= read -r issue_url; do
+        [ -z "$issue_url" ] && continue
+
+        if pr_body_justifies_open_issue "$issue_url"; then
+            continue
+        fi
+
+        local same_repo_ref=""
+        if [ -n "$repo_slug" ] && echo "$issue_url" | grep -q "^https://github.com/${repo_slug}/issues/[0-9]\+$"; then
+            same_repo_ref="#${issue_url##*/}"
+        fi
+
+        if pr_body_closes_github_issue "$issue_url" "$same_repo_ref"; then
+            continue
+        fi
+
+        emit_warning \
+            "fixable" \
+            "Completed exec-plan '${done_plan_file}' links external GitHub issue '${issue_url}' but the PR body does not include a matching closing keyword" \
+            "Execution PRs should close explicitly linked external GitHub issues so repo-native feedback is resolved together with the implementation record (AI_WORKFLOW.md Step 3)." \
+            "Add 'Closes ${same_repo_ref:-$issue_url}' to the PR body, or explain there why ${issue_url} remains open."
+    done <<< "$linked_issue_urls"
+}
+
+# =============================================================================
 # Check 7: Active plan / issue naming (pre-push + ci)
 # Active files under docs/exec-plan/todo/ and docs/issues/ must use
 # <sequence>-<name>.md, while README.md remains exempt.
@@ -570,6 +749,7 @@ check_branch_naming
 check_exec_plan_existence
 check_workflow_doc_startup_commands
 check_linked_issue_resolution
+check_linked_github_issue_closure
 check_active_workflow_file_naming
 
 # Summary
