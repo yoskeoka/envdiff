@@ -71,15 +71,17 @@ emit_warning() {
         echo "  FIX: ${fix}" >&2
     fi
 
-    if [ -n "$fix" ]; then
-        json_fix=$(json_escape "$fix")
-    fi
+    if [ -n "$REPORT_FILE" ]; then
+        if [ -n "$fix" ]; then
+            json_fix=$(json_escape "$fix")
+        fi
 
-    append_report_record "$(printf '{"type":"warning","class":%s,"finding":%s,"why":%s,"fix":%s}' \
-        "$(json_escape "$normalized_class")" \
-        "$(json_escape "$finding")" \
-        "$(json_escape "$why")" \
-        "$json_fix")"
+        append_report_record "$(printf '{"type":"warning","class":%s,"finding":%s,"why":%s,"fix":%s}' \
+            "$(json_escape "$normalized_class")" \
+            "$(json_escape "$finding")" \
+            "$(json_escape "$why")" \
+            "$json_fix")"
+    fi
 }
 
 info() {
