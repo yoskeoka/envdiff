@@ -1,0 +1,78 @@
+name: Workflow Lint
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Run workflow linter
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          report_file="$(mktemp)"
+          ./tools/workflow-lint.sh --mode=ci --pr-title="$PR_TITLE" --pr-body="$PR_BODY" --report-file="$report_file"
+          REPORT_FILE="$report_file" python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path(os.environ["REPORT_FILE"])
+          records = []
+          if report_path.exists():
+              with report_path.open() as fh:
+                  for line in fh:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      records.append(json.loads(line))
+
+          warnings = [record for record in records if record.get("type") == "warning"]
+          summary = next((record for record in records if record.get("type") == "summary"), None)
+
+          def escape(value: str) -> str:
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          for record in warnings:
+              warning_class = record.get("class", "advisory")
+              title = f"workflow-lint ({warning_class})"
+              message_lines = [record.get("finding", "workflow-lint warning")]
+              why = record.get("why")
+              fix = record.get("fix")
+              if why:
+                  message_lines.append(f"WHY: {why}")
+              if fix:
+                  message_lines.append(f"FIX: {fix}")
+              message = "\n".join(message_lines)
+              print(f"::warning title={escape(title)}::{escape(message)}")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("## Workflow Lint Findings\n\n")
+                  if summary:
+                      fh.write("| Total | Fixable | Advisory |\n")
+                      fh.write("| --- | --- | --- |\n")
+                      fh.write(
+                          f"| {summary.get('total', 0)} | {summary.get('fixable', 0)} | {summary.get('advisory', 0)} |\n\n"
+                      )
+                  else:
+                      fh.write("_No summary record emitted._\n\n")
+
+                  if warnings:
+                      fh.write("| Class | Finding |\n")
+                      fh.write("| --- | --- |\n")
+                      for record in warnings:
+                          finding = record.get("finding", "").replace("\n", " ").replace("|", "\\|")
+                          fh.write(f"| {record.get('class', 'advisory')} | {finding} |\n")
+                  else:
+                      fh.write("No workflow-lint warnings.\n")
+          PY

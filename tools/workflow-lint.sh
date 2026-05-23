@@ -13,6 +13,7 @@ NC='\033[0m' # No Color
 MODE=""
 PR_TITLE=""
 PR_BODY=""
+REPORT_FILE=""
 WARN_COUNT=0
 FIXABLE_WARN_COUNT=0
 ADVISORY_WARN_COUNT=0
@@ -22,8 +23,22 @@ DELETED_FILES=""
 NAME_STATUS=""
 
 usage() {
-    echo "Usage: $0 --mode=pre-push|ci [--pr-title=TITLE] [--pr-body=BODY]" >&2
+    echo "Usage: $0 --mode=pre-push|ci [--pr-title=TITLE] [--pr-body=BODY] [--report-file=PATH]" >&2
     exit 1
+}
+
+json_escape() {
+    printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+append_report_record() {
+    local json_record="$1"
+
+    if [ -z "$REPORT_FILE" ]; then
+        return
+    fi
+
+    printf '%s\n' "$json_record" >> "$REPORT_FILE"
 }
 
 emit_warning() {
@@ -32,6 +47,7 @@ emit_warning() {
     local why="$3"
     local fix="${4:-}"
     local normalized_class="$warning_class"
+    local json_fix='null'
 
     WARN_COUNT=$((WARN_COUNT + 1))
 
@@ -53,6 +69,18 @@ emit_warning() {
     echo "  WHY: ${why}" >&2
     if [ "$normalized_class" = "fixable" ] && [ -n "$fix" ]; then
         echo "  FIX: ${fix}" >&2
+    fi
+
+    if [ -n "$REPORT_FILE" ]; then
+        if [ -n "$fix" ]; then
+            json_fix=$(json_escape "$fix")
+        fi
+
+        append_report_record "$(printf '{"type":"warning","class":%s,"finding":%s,"why":%s,"fix":%s}' \
+            "$(json_escape "$normalized_class")" \
+            "$(json_escape "$finding")" \
+            "$(json_escape "$why")" \
+            "$json_fix")"
     fi
 }
 
@@ -368,6 +396,9 @@ for arg in "$@"; do
         --pr-body=*)
             PR_BODY="${arg#--pr-body=}"
             ;;
+        --report-file=*)
+            REPORT_FILE="${arg#--report-file=}"
+            ;;
         --help|-h)
             usage
             ;;
@@ -386,6 +417,11 @@ fi
 if [ "$MODE" != "pre-push" ] && [ "$MODE" != "ci" ]; then
     echo "Error: --mode must be 'pre-push' or 'ci'" >&2
     usage
+fi
+
+if [ -n "$REPORT_FILE" ]; then
+    mkdir -p "$(dirname "$REPORT_FILE")"
+    : > "$REPORT_FILE"
 fi
 
 info "Workflow linter running in ${MODE} mode"
@@ -764,5 +800,10 @@ if [ "$WARN_COUNT" -gt 0 ]; then
 else
     info "Workflow linter: all checks passed"
 fi
+
+append_report_record "$(printf '{"type":"summary","total":%s,"fixable":%s,"advisory":%s}' \
+    "$WARN_COUNT" \
+    "$FIXABLE_WARN_COUNT" \
+    "$ADVISORY_WARN_COUNT")"
 
 exit 0
