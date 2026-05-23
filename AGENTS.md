@@ -25,3 +25,4 @@ This project follows the AI-Centered Development workflow defined in the parent 
 2. **Plan first**: Non-trivial changes need an execution plan in `docs/exec-plan/todo/`, using active filenames of the form `<sequence>-<name>.md`.
 3. **Log issues**: Unrelated problems found during work go in `docs/issues/` using active filenames of the form `<sequence>-<name>.md`.
 4. **PR for everything**: All changes go through GitHub PR review.
+5. **GitHub Actions pinning**: When editing GitHub Actions workflows or composite actions, use `pinact` to pin or update `uses:` references rather than hand-editing version tags.
