@@ -1,0 +1,242 @@
+name: Slopless
+
+"on":
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - ".github/workflows/slopless.yml"
+
+jobs:
+  slopless:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      SLOPLESS_VERSION: 0.2.10
+      SLOPLESS_SHA: c40c40f3127d0c61cbfc1c34cacf0a5f49ed7e26
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR base branch
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+
+      - name: Run slopless for changed Markdown files
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          actual_git_head="$(npm view "slopless@${SLOPLESS_VERSION}" gitHead | tr -d '\n')"
+          if [ "$actual_git_head" != "$SLOPLESS_SHA" ]; then
+            echo "slopless gitHead mismatch: expected ${SLOPLESS_SHA}, got ${actual_git_head}" >&2
+            exit 1
+          fi
+
+          mapfile -t files < <(
+            git diff --name-only --diff-filter=AMR "${BASE_REF}...HEAD" | while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              [ -f "$path" ] || continue
+              case "$path" in
+                *.md) printf '%s\n' "$path" ;;
+              esac
+            done
+          )
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No changed Markdown files found."
+            exit 0
+          fi
+
+          printf 'Changed Markdown files:\n'
+          printf '  %s\n' "${files[@]}"
+
+          python3 - "${files[@]}" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["SLOPLESS_VERSION"]
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          repo_root = Path.cwd()
+          github_token = os.environ.get("GITHUB_TOKEN")
+          github_api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          github_repository = os.environ.get("GITHUB_REPOSITORY")
+          pr_number = os.environ.get("PR_NUMBER")
+          comment_marker = "<!-- slopless-ci-comment -->"
+
+          rule_hints = {
+              "slopless/coleman-liau": "Use shorter words and split dense sentences so the average letters per word and sentence length both drop.",
+              "slopless/flesch-kincaid": "Shorten sentences, prefer simpler wording, and turn dense paragraphs into bullets where that keeps the meaning intact.",
+              "slopless/gunning-fog": "Keep each sentence to one idea and replace multi-syllable jargon with plainer alternatives when accuracy allows.",
+          }
+
+          findings = []
+          linted_files = []
+
+          for raw_path in sys.argv[1:]:
+              path = Path(raw_path)
+              proc = subprocess.run(
+                  [
+                      "npx",
+                      "--yes",
+                      f"--package=slopless@{version}",
+                      "slopless",
+                      str(path),
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+
+              stdout = proc.stdout.strip()
+              if not stdout:
+                  if proc.returncode == 0:
+                      linted_files.append(str(path))
+                      continue
+                  if proc.stderr:
+                      sys.stderr.write(proc.stderr)
+                  raise SystemExit(f"slopless returned {proc.returncode} without JSON output for {path}")
+
+              try:
+                  records = json.loads(stdout)
+              except json.JSONDecodeError as exc:
+                  if proc.stderr:
+                      sys.stderr.write(proc.stderr)
+                  raise SystemExit(f"failed to parse slopless JSON for {path}: {exc}") from exc
+
+              linted_files.append(str(path))
+              for record in records:
+                  file_path = Path(record.get("filePath", str(path)))
+                  try:
+                      display_path = str(file_path.resolve().relative_to(repo_root))
+                  except ValueError:
+                      display_path = str(file_path)
+                  for message in record.get("messages", []):
+                      rule = message.get("ruleId", "slopless")
+                      hint = rule_hints.get(
+                          rule,
+                          "Shorten sentences and simplify wording until the prose becomes easier to scan.",
+                      )
+                      findings.append(
+                          {
+                              "file": display_path,
+                              "line": message.get("line", 1),
+                              "column": message.get("column", 1),
+                              "rule": rule,
+                              "message": message.get("message", "slopless finding"),
+                              "hint": hint,
+                          }
+                      )
+
+          def escape_data(value: str) -> str:
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          def escape_property(value: str) -> str:
+              return escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+          for finding in findings:
+              title = finding["rule"]
+              print(
+                  "::warning file={file},line={line},col={column},title={title}::{message}".format(
+                      file=escape_property(finding["file"]),
+                      line=finding["line"],
+                      column=finding["column"],
+                      title=escape_property(title),
+                      message=escape_data(f"{finding['message']} Hint: {finding['hint']}"),
+                  )
+              )
+
+          def build_comment_body() -> str:
+              lines = [
+                  comment_marker,
+                  "## Slopless Findings",
+                  "",
+                  f"- Files checked: {len(linted_files)}",
+                  f"- Findings: {len(findings)}",
+                  "",
+              ]
+              if findings:
+                  lines.extend(
+                      [
+                          "| File | Line | Rule | Warning | Repair hint |",
+                          "| --- | --- | --- | --- | --- |",
+                      ]
+                  )
+                  for finding in findings:
+                      file_name = finding["file"].replace("|", "\\|")
+                      rule = finding["rule"].replace("|", "\\|")
+                      message = finding["message"].replace("\n", " ").replace("|", "\\|")
+                      hint = finding["hint"].replace("\n", " ").replace("|", "\\|")
+                      lines.append(
+                          f"| {file_name} | {finding['line']} | {rule} | {message} | {hint} |"
+                      )
+              else:
+                  lines.append("No slopless warnings.")
+              return "\n".join(lines) + "\n"
+
+          def github_request(method: str, url: str, payload: dict | None = None) -> dict | list:
+              if not github_token:
+                  raise RuntimeError("GITHUB_TOKEN is required for PR comment upsert")
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {github_token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "slopless-ci",
+              }
+              data = None
+              if payload is not None:
+                  headers["Content-Type"] = "application/json"
+                  data = json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(request) as response:
+                  body = response.read().decode("utf-8")
+              return json.loads(body) if body else {}
+
+          def upsert_pr_comment(body: str) -> None:
+              if not github_repository or not pr_number:
+                  print("Skipping PR comment upsert because repository or PR number is missing.")
+                  return
+              comments_url = (
+                  f"{github_api_url}/repos/{github_repository}/issues/{pr_number}/comments?per_page=100"
+              )
+              try:
+                  comments = github_request("GET", comments_url)
+                  for comment in comments:
+                      if comment_marker in comment.get("body", ""):
+                          update_url = f"{github_api_url}/repos/{github_repository}/issues/comments/{comment['id']}"
+                          github_request("PATCH", update_url, {"body": body})
+                          print(f"Updated slopless PR comment: {comment['html_url']}")
+                          return
+                  created = github_request("POST", comments_url, {"body": body})
+                  print(f"Created slopless PR comment: {created.get('html_url', comments_url)}")
+              except urllib.error.HTTPError as exc:
+                  details = exc.read().decode("utf-8", errors="replace")
+                  print(
+                      f"Skipping PR comment upsert due to GitHub API error {exc.code}: {details}",
+                      file=sys.stderr,
+                  )
+
+          comment_body = build_comment_body()
+
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write(comment_body.removeprefix(f"{comment_marker}\n"))
+
+          upsert_pr_comment(comment_body)
+          PY
