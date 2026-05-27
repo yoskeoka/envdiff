@@ -120,24 +120,37 @@ jobs:
                   sys.stderr.write(proc.stderr)
               raise SystemExit(f"slopless returned {proc.returncode} without usable JSON output")
           if not stdout:
-              if proc.stderr:
-                  sys.stderr.write(proc.stderr)
-              raise SystemExit("slopless returned no JSON output")
+              if proc.returncode == 0:
+                  records = []
+                  stdout = ""
+              else:
+                  if proc.stderr:
+                      sys.stderr.write(proc.stderr)
+                  raise SystemExit("slopless returned no JSON output")
+          else:
+              try:
+                  records = json.loads(stdout)
+              except json.JSONDecodeError as exc:
+                  if proc.stderr:
+                      sys.stderr.write(proc.stderr)
+                  raise SystemExit(f"failed to parse slopless JSON: {exc}") from exc
 
-          try:
-              records = json.loads(stdout)
-          except json.JSONDecodeError as exc:
-              if proc.stderr:
-                  sys.stderr.write(proc.stderr)
-              raise SystemExit(f"failed to parse slopless JSON: {exc}") from exc
-
+          unknown_file_label = "(unknown file)"
+          single_file_fallback = linted_files[0] if len(linted_files) == 1 else None
           findings = []
           for record in records:
-              file_path = Path(record.get("filePath", ""))
-              try:
-                  display_path = str(file_path.resolve().relative_to(repo_root))
-              except ValueError:
-                  display_path = str(file_path)
+              raw_file_path = record.get("filePath")
+              if raw_file_path:
+                  file_path = Path(raw_file_path)
+                  try:
+                      display_path = str(file_path.resolve().relative_to(repo_root))
+                  except ValueError:
+                      display_path = str(file_path)
+              elif single_file_fallback:
+                  display_path = single_file_fallback
+              else:
+                  display_path = unknown_file_label
+
               for message in record.get("messages", []):
                   rule = message.get("ruleId", "slopless")
                   hint = rule_hints.get(
@@ -155,6 +168,13 @@ jobs:
                       }
                   )
 
+          for finding in findings:
+              if finding["file"] == unknown_file_label:
+                  print(
+                      f"slopless finding missing filePath; using {unknown_file_label} in summaries/comments",
+                      file=sys.stderr,
+                  )
+
           def escape_data(value: str) -> str:
               return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
@@ -167,13 +187,22 @@ jobs:
 
           for finding in findings:
               title = finding["rule"]
+              message = escape_data(f"{finding['message']} Hint: {finding['hint']}")
+              if finding["file"] == unknown_file_label:
+                  print(
+                      "::warning title={title}::{message}".format(
+                          title=escape_property(title),
+                          message=message,
+                      )
+                  )
+                  continue
               print(
                   "::warning file={file},line={line},col={column},title={title}::{message}".format(
                       file=escape_property(finding["file"]),
                       line=finding["line"],
                       column=finding["column"],
                       title=escape_property(title),
-                      message=escape_data(f"{finding['message']} Hint: {finding['hint']}"),
+                      message=message,
                   )
               )
 
