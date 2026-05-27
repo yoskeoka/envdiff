@@ -15,12 +15,17 @@ jobs:
       issues: write
       pull-requests: write
     env:
+      NODE_VERSION: "22.19"
       SLOPLESS_VERSION: 0.2.10
       SLOPLESS_SHA: c40c40f3127d0c61cbfc1c34cacf0a5f49ed7e26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Fetch PR base branch
         env:
@@ -66,12 +71,15 @@ jobs:
           python3 - "${files[@]}" <<'PY'
           import json
           import os
+          import socket
           import subprocess
           import sys
           import urllib.error
           import urllib.request
           from pathlib import Path
 
+          COMMAND_TIMEOUT_SECONDS = 120
+          HTTP_TIMEOUT_SECONDS = 30
           version = os.environ["SLOPLESS_VERSION"]
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
           repo_root = Path.cwd()
@@ -87,68 +95,75 @@ jobs:
               "slopless/gunning-fog": "Keep each sentence to one idea and replace multi-syllable jargon with plainer alternatives when accuracy allows.",
           }
 
-          findings = []
-          linted_files = []
-
-          for raw_path in sys.argv[1:]:
-              path = Path(raw_path)
+          linted_files = [str(Path(raw_path)) for raw_path in sys.argv[1:]]
+          try:
               proc = subprocess.run(
                   [
                       "npx",
                       "--yes",
                       f"--package=slopless@{version}",
                       "slopless",
-                      str(path),
+                      *linted_files,
                   ],
                   capture_output=True,
                   text=True,
+                  timeout=COMMAND_TIMEOUT_SECONDS,
               )
+          except subprocess.TimeoutExpired as exc:
+              raise SystemExit(
+                  f"slopless timed out after {COMMAND_TIMEOUT_SECONDS}s: {exc.cmd}"
+              ) from exc
 
-              stdout = proc.stdout.strip()
-              if not stdout:
-                  if proc.returncode == 0:
-                      linted_files.append(str(path))
-                      continue
-                  if proc.stderr:
-                      sys.stderr.write(proc.stderr)
-                  raise SystemExit(f"slopless returned {proc.returncode} without JSON output for {path}")
+          stdout = proc.stdout.strip()
+          if proc.returncode not in (0, 1):
+              if proc.stderr:
+                  sys.stderr.write(proc.stderr)
+              raise SystemExit(f"slopless returned {proc.returncode} without usable JSON output")
+          if not stdout:
+              if proc.stderr:
+                  sys.stderr.write(proc.stderr)
+              raise SystemExit("slopless returned no JSON output")
 
+          try:
+              records = json.loads(stdout)
+          except json.JSONDecodeError as exc:
+              if proc.stderr:
+                  sys.stderr.write(proc.stderr)
+              raise SystemExit(f"failed to parse slopless JSON: {exc}") from exc
+
+          findings = []
+          for record in records:
+              file_path = Path(record.get("filePath", ""))
               try:
-                  records = json.loads(stdout)
-              except json.JSONDecodeError as exc:
-                  if proc.stderr:
-                      sys.stderr.write(proc.stderr)
-                  raise SystemExit(f"failed to parse slopless JSON for {path}: {exc}") from exc
-
-              linted_files.append(str(path))
-              for record in records:
-                  file_path = Path(record.get("filePath", str(path)))
-                  try:
-                      display_path = str(file_path.resolve().relative_to(repo_root))
-                  except ValueError:
-                      display_path = str(file_path)
-                  for message in record.get("messages", []):
-                      rule = message.get("ruleId", "slopless")
-                      hint = rule_hints.get(
-                          rule,
-                          "Shorten sentences and simplify wording until the prose becomes easier to scan.",
-                      )
-                      findings.append(
-                          {
-                              "file": display_path,
-                              "line": message.get("line", 1),
-                              "column": message.get("column", 1),
-                              "rule": rule,
-                              "message": message.get("message", "slopless finding"),
-                              "hint": hint,
-                          }
-                      )
+                  display_path = str(file_path.resolve().relative_to(repo_root))
+              except ValueError:
+                  display_path = str(file_path)
+              for message in record.get("messages", []):
+                  rule = message.get("ruleId", "slopless")
+                  hint = rule_hints.get(
+                      rule,
+                      "Shorten sentences and simplify wording until the prose becomes easier to scan.",
+                  )
+                  findings.append(
+                      {
+                          "file": display_path,
+                          "line": message.get("line", 1),
+                          "column": message.get("column", 1),
+                          "rule": rule,
+                          "message": message.get("message", "slopless finding"),
+                          "hint": hint,
+                      }
+                  )
 
           def escape_data(value: str) -> str:
               return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
           def escape_property(value: str) -> str:
-              return escape_data(value).replace(":", "%3A").replace(",", "%2C")
+              return (
+                  escape_data(value)
+                  .replace(":", "%3A")
+                  .replace(",", "%2C")
+              )
 
           for finding in findings:
               title = finding["rule"]
@@ -204,20 +219,33 @@ jobs:
                   headers["Content-Type"] = "application/json"
                   data = json.dumps(payload).encode("utf-8")
               request = urllib.request.Request(url, data=data, headers=headers, method=method)
-              with urllib.request.urlopen(request) as response:
+              with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
                   body = response.read().decode("utf-8")
               return json.loads(body) if body else {}
+
+          def iter_pr_comments():
+              page = 1
+              while True:
+                  comments_url = (
+                      f"{github_api_url}/repos/{github_repository}/issues/{pr_number}/comments"
+                      f"?per_page=100&page={page}"
+                  )
+                  comments = github_request("GET", comments_url)
+                  if not comments:
+                      return
+                  for comment in comments:
+                      yield comment
+                  if len(comments) < 100:
+                      return
+                  page += 1
 
           def upsert_pr_comment(body: str) -> None:
               if not github_repository or not pr_number:
                   print("Skipping PR comment upsert because repository or PR number is missing.")
                   return
-              comments_url = (
-                  f"{github_api_url}/repos/{github_repository}/issues/{pr_number}/comments?per_page=100"
-              )
+              comments_url = f"{github_api_url}/repos/{github_repository}/issues/{pr_number}/comments"
               try:
-                  comments = github_request("GET", comments_url)
-                  for comment in comments:
+                  for comment in iter_pr_comments():
                       if comment_marker in comment.get("body", ""):
                           update_url = f"{github_api_url}/repos/{github_repository}/issues/comments/{comment['id']}"
                           github_request("PATCH", update_url, {"body": body})
@@ -231,6 +259,8 @@ jobs:
                       f"Skipping PR comment upsert due to GitHub API error {exc.code}: {details}",
                       file=sys.stderr,
                   )
+              except (socket.timeout, TimeoutError, urllib.error.URLError) as exc:
+                  print(f"Skipping PR comment upsert due to GitHub API timeout/error: {exc}", file=sys.stderr)
 
           comment_body = build_comment_body()
 
