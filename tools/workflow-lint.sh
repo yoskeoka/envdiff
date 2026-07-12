@@ -778,6 +778,148 @@ check_active_workflow_file_naming() {
     check_active_filename_format "docs/issues" "issue"
 }
 
+# =============================================================================
+# Check 8: Workspace workflow context contract (pre-push + ci)
+# The workspace owns this layered documentation contract. Child repositories may
+# consume workflow skills without carrying every workspace document, so scope
+# this check to the workspace repository itself.
+# =============================================================================
+check_workflow_context_contract() {
+    local origin_url
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+    case "$origin_url" in
+        *yoskeoka/vibe-coding-workspace*) ;;
+        *) return ;;
+    esac
+
+    local required_file
+    local required_files=(
+        "AGENTS.md"
+        "AI_WORKFLOW.md"
+        "docs/specs/workflow-context-contract.md"
+        "docs/design-decisions/README.md"
+        "docs/lessons.md"
+    )
+    for required_file in "${required_files[@]}"; do
+        if [ ! -f "$required_file" ]; then
+            emit_warning \
+                "fixable" \
+                "Workflow context contract is missing '${required_file}'" \
+                "The workspace requires a universal entrypoint, lifecycle reference, on-demand contract, ADR index, and active-exceptions register." \
+                "Restore '${required_file}' from the workflow context contract."
+        fi
+    done
+
+    if [ -f "docs/design-decisions/adr.md" ]; then
+        emit_warning \
+            "fixable" \
+            "Monolithic ADR file 'docs/design-decisions/adr.md' remains" \
+            "Architecture decisions are immutable numbered records indexed from docs/design-decisions/README.md." \
+            "Migrate the record to docs/design-decisions/adr/ and remove adr.md."
+    fi
+
+    if [ -f "AGENTS.md" ] && ! grep -q 'AI_WORKFLOW.md#' "AGENTS.md"; then
+        emit_warning "fixable" "AGENTS.md does not route tasks to lifecycle sections" \
+            "The short universal entrypoint must direct agents to phase-specific reads." \
+            "Add the task-to-document table with AI_WORKFLOW.md section links."
+    fi
+    if [ -f "AI_WORKFLOW.md" ] && ! grep -q 'workflow-context-contract.md' "AI_WORKFLOW.md"; then
+        emit_warning "fixable" "AI_WORKFLOW.md does not link the workflow context contract" \
+            "Lifecycle rules and document ownership must remain discoverable together." \
+            "Link docs/specs/workflow-context-contract.md from AI_WORKFLOW.md."
+    fi
+
+    local skill_file
+    local workflow_skills=(
+        "skills/plan-execution/SKILL.md"
+        "skills/execute-task/SKILL.md"
+        "skills/review-task/SKILL.md"
+        "skills/post-task-review/SKILL.md"
+        "skills/manage-workflow/SKILL.md"
+        "skills/plan-project/SKILL.md"
+        "skills/triage-tasks/SKILL.md"
+    )
+    for skill_file in "${workflow_skills[@]}"; do
+        if [ ! -f "$skill_file" ] || ! grep -q 'AI_WORKFLOW.md#' "$skill_file"; then
+            emit_warning "fixable" "Workflow skill '${skill_file}' lacks a lifecycle link" \
+                "Skills own procedures and route shared lifecycle rules to AI_WORKFLOW.md." \
+                "Add the applicable AI_WORKFLOW.md section link."
+        fi
+    done
+
+    if [ -d "docs/design-decisions/adr" ]; then
+        local adr_file
+        local adr_base
+        local adr_count=0
+        for adr_file in docs/design-decisions/adr/*.md; do
+            [ -e "$adr_file" ] || continue
+            adr_count=$((adr_count + 1))
+            adr_base=$(basename "$adr_file")
+            if ! grep -qE "^\| \[[0-9]{4}\]\(adr/${adr_base//./\\.}\) \| (Proposed|Accepted|Deprecated|Superseded) \| [^|]+ \| [^|]+ \|$" "docs/design-decisions/README.md"; then
+                emit_warning "fixable" "ADR '${adr_file}' is not indexed" \
+                    "Every immutable decision record needs an ID, status, tags, and one-line outcome in the ADR index." \
+                    "Add an ID, status, tags, and outcome row to docs/design-decisions/README.md."
+            fi
+            if ! grep -qE '^# .+' "$adr_file" \
+                || ! grep -q '^## Status$' "$adr_file" \
+                || ! grep -q '^## Context$' "$adr_file" \
+                || ! grep -q '^## Decision$' "$adr_file" \
+                || ! grep -q '^## Consequences$' "$adr_file"; then
+                emit_warning "fixable" "ADR '${adr_file}' is not a Michael Nygard record" \
+                    "ADR records require title, Status, Context, Decision, and Consequences sections." \
+                    "Use the ADR template under skills/manage-workflow/templates/docs/design-decisions/adr/."
+            fi
+        done
+        if [ "$adr_count" -eq 0 ]; then
+            emit_warning "fixable" "ADR directory has no numbered decision records" \
+                "The compact ADR layout keeps decisions as immutable per-record files." \
+                "Add a migrated or newly accepted record under docs/design-decisions/adr/."
+        fi
+    else
+        emit_warning "fixable" "ADR record directory is missing" \
+            "The workspace ADR index requires docs/design-decisions/adr/." \
+            "Create docs/design-decisions/adr/ and migrate decisions into numbered records."
+    fi
+
+    if [ -f "docs/design-decisions/README.md" ] \
+        && ! grep -qE '^\| \[?[0-9]{4}\]?\(?(adr/|.*adr/)' "docs/design-decisions/README.md"; then
+        emit_warning "fixable" "ADR index has no numbered record rows" \
+            "The ADR index must expose ID, status, tags, and one-line outcome for each decision." \
+            "Add linked numbered ADR rows to docs/design-decisions/README.md."
+    fi
+
+    if [ -f "docs/lessons.md" ]; then
+        local lesson_count
+        lesson_count=$(grep -c '^## ' "docs/lessons.md" || true)
+        if [ "$lesson_count" -gt 10 ]; then
+            emit_warning "fixable" "Active exceptions register has ${lesson_count} entries" \
+                "docs/lessons.md is capped at ten unresolved recurring risks." \
+                "Promote resolved rules to canonical docs and remove their exception entries."
+        fi
+        local malformed_exceptions
+        malformed_exceptions=$(awk '
+            /^## / {
+                if (active && (!remediation || !trigger)) bad++
+                active = 1
+                remediation = 0
+                trigger = 0
+                next
+            }
+            /^Canonical remediation:/ { remediation = 1 }
+            /^Review trigger:/ { trigger = 1 }
+            END {
+                if (active && (!remediation || !trigger)) bad++
+                print bad + 0
+            }
+        ' "docs/lessons.md")
+        if [ "$malformed_exceptions" -gt 0 ]; then
+            emit_warning "fixable" "${malformed_exceptions} active exception entries lack required metadata" \
+                "Each unresolved recurring risk must include canonical remediation and a review trigger." \
+                "Add 'Canonical remediation: <link>' and 'Review trigger: <condition>' to every active exception."
+        fi
+    fi
+}
+
 # Run checks
 check_issue_lifecycle
 check_docs_change_hint
@@ -787,6 +929,7 @@ check_workflow_doc_startup_commands
 check_linked_issue_resolution
 check_linked_github_issue_closure
 check_active_workflow_file_naming
+check_workflow_context_contract
 
 # Summary
 if [ "$WARN_COUNT" -gt 0 ]; then
