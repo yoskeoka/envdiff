@@ -20,7 +20,7 @@ ADVISORY_WARN_COUNT=0
 DIFF_CHECKS_AVAILABLE=true
 CHANGED_FILES=""
 DELETED_FILES=""
-NAME_STATUS=""
+DIFF_BASE=""
 
 usage() {
     echo "Usage: $0 --mode=pre-push|ci [--pr-title=TITLE] [--pr-body=BODY] [--report-file=PATH]" >&2
@@ -99,46 +99,22 @@ active_workflow_filename_regex() {
 matching_exec_plan_files() {
     local plan_name="$1"
 
-    find docs/exec-plan/todo docs/exec-plan/done -maxdepth 1 -type f \
+    [ -d docs/exec-plan/todo ] || return 0
+
+    find docs/exec-plan/todo -maxdepth 1 -type f \
         \( -name "*-${plan_name}.md" -o -name "${plan_name}.md" \) \
         | sort
 }
 
-resolve_exec_plan_paths() {
+deleted_matching_exec_plan_files() {
     local plan_name="$1"
-    local todo_match=""
-    local done_match=""
-    local path=""
 
-    while IFS= read -r path; do
-        [ -z "$path" ] && continue
-        case "$path" in
-            docs/exec-plan/todo/*)
-                if [ -z "$todo_match" ]; then
-                    todo_match="$path"
-                fi
-                ;;
-            docs/exec-plan/done/*)
-                if [ -z "$done_match" ]; then
-                    done_match="$path"
-                fi
-                ;;
-        esac
-    done < <(matching_exec_plan_files "$plan_name")
-
-    printf '%s|%s\n' "$todo_match" "$done_match"
-}
-
-current_exec_plan_paths() {
-    local branch
-    branch=$(current_branch)
-
-    if ! echo "$branch" | grep -qE "^(feat|fix)/"; then
-        return
-    fi
-
-    local plan_name="${branch#*/}"
-    resolve_exec_plan_paths "$plan_name"
+    printf '%s\n' "$DELETED_FILES" | awk -v plan_name="$plan_name" '
+        $0 ~ "^docs/exec-plan/todo/" &&
+            ($0 ~ ("-" plan_name "\\.md$") || $0 ~ ("/" plan_name "\\.md$")) {
+            print
+        }
+    ' | sort
 }
 
 current_github_repo_slug() {
@@ -167,12 +143,16 @@ current_github_repo_slug() {
     esac
 }
 
-extract_linked_issue_paths_from_plan() {
+deleted_exec_plan_content() {
     local plan_file="$1"
 
-    [ -f "$plan_file" ] || return
+    git show "${DIFF_BASE}:${plan_file}" 2>/dev/null || true
+}
 
-    awk '
+extract_linked_issue_paths_from_deleted_plan() {
+    local plan_file="$1"
+
+    deleted_exec_plan_content "$plan_file" | awk '
         function emit_paths(text) {
             gsub(/`/, "", text)
             while (match(text, /docs\/issues\/[A-Za-z0-9._-]+\.md/)) {
@@ -187,26 +167,16 @@ extract_linked_issue_paths_from_plan() {
             next
         }
 
-        collect && /^#{1,6}[[:space:]]/ {
-            collect = 0
-        }
-
-        collect && /^[^[:space:]#-].*:[[:space:]]*$/ {
-            collect = 0
-        }
-
-        collect {
-            emit_paths($0)
-        }
-    ' "$plan_file"
+        collect && /^#{1,6}[[:space:]]/ { collect = 0 }
+        collect && /^[^[:space:]#-].*:[[:space:]]*$/ { collect = 0 }
+        collect { emit_paths($0) }
+    '
 }
 
-extract_linked_github_issue_urls_from_plan() {
+extract_linked_github_issue_urls_from_deleted_plan() {
     local plan_file="$1"
 
-    [ -f "$plan_file" ] || return
-
-    awk '
+    deleted_exec_plan_content "$plan_file" | awk '
         function is_addresses_continuation(line) {
             return line ~ /^[[:space:]]*([-*][[:space:]]+)?https:\/\/github\.com\// \
                 || line ~ /^[[:space:]]*([-*][[:space:]]+)?`https:\/\/github\.com\//
@@ -220,55 +190,37 @@ extract_linked_github_issue_urls_from_plan() {
             }
         }
 
-        /^Addresses:/ {
-            emit_urls($0)
-            collect = 1
-            next
-        }
-
-        collect && /^#{1,6}[[:space:]]/ {
-            collect = 0
-        }
-
-        collect && /^$/ {
-            collect = 0
-        }
-
-        collect && !is_addresses_continuation($0) {
-            collect = 0
-        }
-
-        collect {
-            emit_urls($0)
-        }
-    ' "$plan_file"
+        /^Addresses:/ { emit_urls($0); collect = 1; next }
+        collect && /^#{1,6}[[:space:]]/ { collect = 0 }
+        collect && /^$/ { collect = 0 }
+        collect && !is_addresses_continuation($0) { collect = 0 }
+        collect { emit_urls($0) }
+    '
 }
 
 check_ambiguous_exec_plan_mapping() {
     local branch="$1"
     local plan_name="$2"
-    local todo_matches=0
-    local done_matches=0
+    local active_matches=0
+    local deleted_matches=0
     local path=""
 
     while IFS= read -r path; do
         [ -z "$path" ] && continue
-        case "$path" in
-            docs/exec-plan/todo/*)
-                todo_matches=$((todo_matches + 1))
-                ;;
-            docs/exec-plan/done/*)
-                done_matches=$((done_matches + 1))
-                ;;
-        esac
+        active_matches=$((active_matches + 1))
     done < <(matching_exec_plan_files "$plan_name")
 
-    if [ "$todo_matches" -gt 1 ] || [ "$done_matches" -gt 1 ]; then
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        deleted_matches=$((deleted_matches + 1))
+    done < <(deleted_matching_exec_plan_files "$plan_name")
+
+    if [ "$active_matches" -gt 1 ] || [ "$deleted_matches" -gt 1 ]; then
         emit_warning \
             "fixable" \
             "Ambiguous exec-plan mapping for branch '${branch}'" \
-            "Multiple active or completed exec-plans share the same '-${plan_name}.md' suffix, so workflow-lint cannot reliably tell which file the branch should map to." \
-            "Keep only one matching file per directory for suffix '${plan_name}.md' by renaming or removing the duplicate plan entry."
+            "Multiple active or deleted exec-plans share the same '-${plan_name}.md' suffix, so workflow-lint cannot reliably tell which file the branch should map to." \
+            "Keep only one active plan or one deleted completion plan for suffix '${plan_name}.md'."
     fi
 }
 
@@ -341,20 +293,6 @@ pr_body_closes_github_issue() {
             }
         }
 
-        END {
-            exit(found ? 0 : 1)
-        }
-    '
-}
-
-diff_includes_rename() {
-    local old_path="$1"
-    local new_path="$2"
-
-    printf '%s\n' "$NAME_STATUS" | awk -v old_path="$old_path" -v new_path="$new_path" '
-        $1 ~ /^R[0-9]+$/ && $2 == old_path && $3 == new_path {
-            found = 1
-        }
         END {
             exit(found ? 0 : 1)
         }
@@ -441,9 +379,17 @@ if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
         "Shallow or partially fetched clones can omit the branch the linter compares against, which would otherwise look like 'no changes'. Fetch the base branch locally before rerunning workflow-lint."
     DIFF_CHECKS_AVAILABLE=false
 else
+    if ! DIFF_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null); then
+        emit_warning \
+            "advisory" \
+            "Unable to resolve a merge base with '${BASE_REF}'; skipping diff-based workflow checks" \
+            "The repository state prevented workflow-lint from recovering the base-side completion artifacts."
+        DIFF_CHECKS_AVAILABLE=false
+    fi
+
     # Get changed files relative to base
     # --diff-filter=D lists deleted files, ADMR lists added/deleted/modified/renamed
-    if ! CHANGED_FILES=$(git diff --name-only --diff-filter=ADMR "${BASE_REF}...HEAD" 2>/dev/null); then
+    if $DIFF_CHECKS_AVAILABLE && ! CHANGED_FILES=$(git diff --name-only --diff-filter=ADMR "${DIFF_BASE}...HEAD" 2>/dev/null); then
         emit_warning \
             "advisory" \
             "Unable to compute changed files relative to '${BASE_REF}'; skipping diff-based workflow checks" \
@@ -451,7 +397,7 @@ else
         DIFF_CHECKS_AVAILABLE=false
     fi
 
-    if ! DELETED_FILES=$(git diff --name-only --diff-filter=D "${BASE_REF}...HEAD" 2>/dev/null); then
+    if $DIFF_CHECKS_AVAILABLE && ! DELETED_FILES=$(git diff --name-only --diff-filter=D "${DIFF_BASE}...HEAD" 2>/dev/null); then
         emit_warning \
             "advisory" \
             "Unable to compute deleted files relative to '${BASE_REF}'; skipping diff-based workflow checks" \
@@ -459,50 +405,10 @@ else
         DIFF_CHECKS_AVAILABLE=false
     fi
 
-    if ! NAME_STATUS=$(git diff --name-status --find-renames "${BASE_REF}...HEAD" 2>/dev/null); then
-        emit_warning \
-            "advisory" \
-            "Unable to compute file status changes relative to '${BASE_REF}'; skipping diff-based workflow checks" \
-            "The repository state prevented git diff from computing rename-aware file status changes, so the linter will keep running only non-diff checks."
-        DIFF_CHECKS_AVAILABLE=false
-    fi
-
     if $DIFF_CHECKS_AVAILABLE && [ -z "$CHANGED_FILES" ] && [ -z "$DELETED_FILES" ]; then
         info "No changes detected relative to ${BASE_REF}"
     fi
 fi
-
-# =============================================================================
-# Check 1: Issue lifecycle (pre-push + ci)
-# Files removed from docs/issues/ must appear in docs/issues/done/
-# =============================================================================
-check_issue_lifecycle() {
-    if ! $DIFF_CHECKS_AVAILABLE; then
-        return
-    fi
-
-    local deleted_issues
-    deleted_issues=$(echo "$DELETED_FILES" | grep '^docs/issues/[^/]*\.md$' || true)
-
-    if [ -z "$deleted_issues" ]; then
-        return
-    fi
-
-    for issue_file in $deleted_issues; do
-        local base_name
-        local done_file
-        base_name=$(basename "$issue_file")
-        done_file="docs/issues/done/$base_name"
-        # Check if the file was added to done/ in this diff
-        if ! echo "$CHANGED_FILES" | grep -qF "$done_file"; then
-            emit_warning \
-                "fixable" \
-                "Issue file '${issue_file}' was deleted instead of moved to done/" \
-                "Issues must be preserved for audit trail (AI_WORKFLOW.md Step 3)" \
-                "git mv ${issue_file} docs/issues/done/${base_name}"
-        fi
-    done
-}
 
 # =============================================================================
 # Check 2: Docs-change hint (ci only)
@@ -589,7 +495,8 @@ check_branch_naming() {
 
 # =============================================================================
 # Check 4: Exec-plan existence (pre-push + ci)
-# feat/* and fix/* branches require a matching exec-plan file
+# feat/* and fix/* branches require a matching active exec-plan file, unless
+# this branch is closing it by deleting the matching plan in the branch diff.
 # =============================================================================
 check_exec_plan_existence() {
     local branch
@@ -602,14 +509,12 @@ check_exec_plan_existence() {
 
     local plan_name="${branch#*/}"
     check_ambiguous_exec_plan_mapping "$branch" "$plan_name"
-    local plan_paths
-    local todo_file
-    local done_file
-    plan_paths=$(resolve_exec_plan_paths "$plan_name")
-    todo_file="${plan_paths%%|*}"
-    done_file="${plan_paths##*|}"
+    local active_plan
+    local deleted_plan
+    active_plan=$(matching_exec_plan_files "$plan_name" | head -n 1)
+    deleted_plan=$(deleted_matching_exec_plan_files "$plan_name" | head -n 1)
 
-    if [ ! -f "$todo_file" ] && [ ! -f "$done_file" ]; then
+    if [ -z "$active_plan" ] && [ -z "$deleted_plan" ]; then
         emit_warning \
             "fixable" \
             "Missing exec-plan for branch '${branch}'" \
@@ -659,28 +564,24 @@ check_workflow_doc_startup_commands() {
 }
 
 # =============================================================================
-# Check 6: Linked local issues declared in completed exec-plans must move to done/
-# Narrow scope: only the matching feat/* or fix/* branch, only after the plan
-# has moved to docs/exec-plan/done/, and only for explicit docs/issues/*.md
-# paths named on an Addresses: line.
+# Check 6: A deleted matching exec-plan requires deletion of its explicitly
+# linked local issues, unless the PR body explains that an issue remains open.
 # =============================================================================
 check_linked_issue_resolution() {
     if ! $DIFF_CHECKS_AVAILABLE; then
         return
     fi
 
-    local plan_paths
-    plan_paths=$(current_exec_plan_paths)
-    [ -z "$plan_paths" ] && return
-
-    local done_plan_file="${plan_paths##*|}"
-
-    if [ ! -f "$done_plan_file" ]; then
-        return
-    fi
+    local branch
+    branch=$(current_branch)
+    if ! echo "$branch" | grep -qE "^(feat|fix)/"; then return; fi
+    local plan_name="${branch#*/}"
+    local deleted_plan_file
+    deleted_plan_file=$(deleted_matching_exec_plan_files "$plan_name" | head -n 1)
+    [ -z "$deleted_plan_file" ] && return
 
     local linked_issues
-    linked_issues=$(extract_linked_issue_paths_from_plan "$done_plan_file")
+    linked_issues=$(extract_linked_issue_paths_from_deleted_plan "$deleted_plan_file")
 
     if [ -z "$linked_issues" ]; then
         return
@@ -688,14 +589,7 @@ check_linked_issue_resolution() {
 
     local issue_file
     for issue_file in $linked_issues; do
-        local base_name
-        local moved_issue_file
-        local plan_reference
-        base_name=$(basename "$issue_file")
-        moved_issue_file="docs/issues/done/$base_name"
-        plan_reference="${done_plan_file}"
-
-        if diff_includes_rename "$issue_file" "$moved_issue_file"; then
+        if printf '%s\n' "$DELETED_FILES" | grep -qxF "$issue_file"; then
             continue
         fi
 
@@ -705,36 +599,35 @@ check_linked_issue_resolution() {
 
         emit_warning \
             "fixable" \
-            "Completed exec-plan '${plan_reference}' links local issue '${issue_file}' but this branch does not move it to done/" \
-            "Execution branches should close explicitly linked local issues in the same branch so reviewers and future sessions can trust the plan-to-issue completion trail (AI_WORKFLOW.md Step 3)." \
-            "Move the issue with 'git mv ${issue_file} ${moved_issue_file}', or explain in the PR body why ${issue_file} remains open."
+            "Deleted exec-plan '${deleted_plan_file}' links local issue '${issue_file}' but this branch does not delete it" \
+            "Execution branches should remove explicitly linked resolved local issues in the same diff so the PR and Git history remain the completion trail (AI_WORKFLOW.md Execution)." \
+            "Delete '${issue_file}' in this branch, or explain in the PR body why it remains open."
     done
 }
 
 # =============================================================================
-# Check 6a: Linked external GitHub issues declared in completed exec-plans
+# Check 6a: Linked external GitHub issues declared in deleted exec-plans
 # must appear in PR-body closing keywords unless intentionally left open.
-# Narrow scope: only the matching feat/* or fix/* branch, only after the plan
-# has moved to docs/exec-plan/done/, only for explicit GitHub issue URLs named
+# Narrow scope: only the matching feat/* or fix/* branch after the plan is
+# deleted, only for explicit GitHub issue URLs named
 # on an Addresses: line, and only in CI mode where PR body input exists.
 # =============================================================================
 check_linked_github_issue_closure() {
-    if [ "$MODE" != "ci" ] || [ -z "$PR_BODY" ]; then
+    if [ "$MODE" != "ci" ]; then
         return
     fi
 
-    local plan_paths
-    plan_paths=$(current_exec_plan_paths)
-    [ -z "$plan_paths" ] && return
-
-    local done_plan_file="${plan_paths##*|}"
-
-    if [ ! -f "$done_plan_file" ]; then
-        return
-    fi
+    if ! $DIFF_CHECKS_AVAILABLE; then return; fi
+    local branch
+    branch=$(current_branch)
+    if ! echo "$branch" | grep -qE "^(feat|fix)/"; then return; fi
+    local plan_name="${branch#*/}"
+    local deleted_plan_file
+    deleted_plan_file=$(deleted_matching_exec_plan_files "$plan_name" | head -n 1)
+    [ -z "$deleted_plan_file" ] && return
 
     local linked_issue_urls
-    linked_issue_urls=$(extract_linked_github_issue_urls_from_plan "$done_plan_file")
+    linked_issue_urls=$(extract_linked_github_issue_urls_from_deleted_plan "$deleted_plan_file")
 
     if [ -z "$linked_issue_urls" ]; then
         return
@@ -762,7 +655,7 @@ check_linked_github_issue_closure() {
 
         emit_warning \
             "fixable" \
-            "Completed exec-plan '${done_plan_file}' links external GitHub issue '${issue_url}' but the PR body does not include a matching closing keyword" \
+            "Deleted exec-plan '${deleted_plan_file}' links external GitHub issue '${issue_url}' but the PR body does not include a matching closing keyword" \
             "Execution PRs should close explicitly linked external GitHub issues so repo-native feedback is resolved together with the implementation record (AI_WORKFLOW.md Step 3)." \
             "Add 'Closes ${same_repo_ref:-$issue_url}' to the PR body, or explain there why ${issue_url} remains open."
     done <<< "$linked_issue_urls"
@@ -778,8 +671,149 @@ check_active_workflow_file_naming() {
     check_active_filename_format "docs/issues" "issue"
 }
 
+# =============================================================================
+# Check 8: Workspace workflow context contract (pre-push + ci)
+# The workspace owns this layered documentation contract. Child repositories may
+# consume workflow skills without carrying every workspace document, so scope
+# this check to the workspace repository itself.
+# =============================================================================
+check_workflow_context_contract() {
+    local origin_url
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+    case "$origin_url" in
+        *yoskeoka/vibe-coding-workspace*) ;;
+        *) return ;;
+    esac
+
+    local required_file
+    local required_files=(
+        "AGENTS.md"
+        "AI_WORKFLOW.md"
+        "docs/specs/workflow-context-contract.md"
+        "docs/design-decisions/README.md"
+        "docs/lessons.md"
+    )
+    for required_file in "${required_files[@]}"; do
+        if [ ! -f "$required_file" ]; then
+            emit_warning \
+                "fixable" \
+                "Workflow context contract is missing '${required_file}'" \
+                "The workspace requires a universal entrypoint, lifecycle reference, on-demand contract, ADR index, and active-exceptions register." \
+                "Restore '${required_file}' from the workflow context contract."
+        fi
+    done
+
+    if [ -f "docs/design-decisions/adr.md" ]; then
+        emit_warning \
+            "fixable" \
+            "Monolithic ADR file 'docs/design-decisions/adr.md' remains" \
+            "Architecture decisions are immutable numbered records indexed from docs/design-decisions/README.md." \
+            "Migrate the record to docs/design-decisions/adr/ and remove adr.md."
+    fi
+
+    if [ -f "AGENTS.md" ] && ! grep -q 'AI_WORKFLOW.md#' "AGENTS.md"; then
+        emit_warning "fixable" "AGENTS.md does not route tasks to lifecycle sections" \
+            "The short universal entrypoint must direct agents to phase-specific reads." \
+            "Add the task-to-document table with AI_WORKFLOW.md section links."
+    fi
+    if [ -f "AI_WORKFLOW.md" ] && ! grep -q 'workflow-context-contract.md' "AI_WORKFLOW.md"; then
+        emit_warning "fixable" "AI_WORKFLOW.md does not link the workflow context contract" \
+            "Lifecycle rules and document ownership must remain discoverable together." \
+            "Link docs/specs/workflow-context-contract.md from AI_WORKFLOW.md."
+    fi
+
+    local skill_file
+    local workflow_skills=(
+        "skills/plan-execution/SKILL.md"
+        "skills/execute-task/SKILL.md"
+        "skills/review-task/SKILL.md"
+        "skills/post-task-review/SKILL.md"
+        "skills/manage-workflow/SKILL.md"
+        "skills/plan-project/SKILL.md"
+        "skills/triage-tasks/SKILL.md"
+    )
+    for skill_file in "${workflow_skills[@]}"; do
+        if [ ! -f "$skill_file" ] || ! grep -q 'AI_WORKFLOW.md#' "$skill_file"; then
+            emit_warning "fixable" "Workflow skill '${skill_file}' lacks a lifecycle link" \
+                "Skills own procedures and route shared lifecycle rules to AI_WORKFLOW.md." \
+                "Add the applicable AI_WORKFLOW.md section link."
+        fi
+    done
+
+    if [ -d "docs/design-decisions/adr" ]; then
+        local adr_file
+        local adr_base
+        local adr_count=0
+        for adr_file in docs/design-decisions/adr/*.md; do
+            [ -e "$adr_file" ] || continue
+            adr_count=$((adr_count + 1))
+            adr_base=$(basename "$adr_file")
+            if ! grep -qE "^\| \[[0-9]{4}\]\(adr/${adr_base//./\\.}\) \| (Proposed|Accepted|Deprecated|Superseded) \| [^|]+ \| [^|]+ \|$" "docs/design-decisions/README.md"; then
+                emit_warning "fixable" "ADR '${adr_file}' is not indexed" \
+                    "Every immutable decision record needs an ID, status, tags, and one-line outcome in the ADR index." \
+                    "Add an ID, status, tags, and outcome row to docs/design-decisions/README.md."
+            fi
+            if ! grep -qE '^# .+' "$adr_file" \
+                || ! grep -q '^## Status$' "$adr_file" \
+                || ! grep -q '^## Context$' "$adr_file" \
+                || ! grep -q '^## Decision$' "$adr_file" \
+                || ! grep -q '^## Consequences$' "$adr_file"; then
+                emit_warning "fixable" "ADR '${adr_file}' is not a Michael Nygard record" \
+                    "ADR records require title, Status, Context, Decision, and Consequences sections." \
+                    "Use the ADR template under skills/manage-workflow/templates/docs/design-decisions/adr/."
+            fi
+        done
+        if [ "$adr_count" -eq 0 ]; then
+            emit_warning "fixable" "ADR directory has no numbered decision records" \
+                "The compact ADR layout keeps decisions as immutable per-record files." \
+                "Add a migrated or newly accepted record under docs/design-decisions/adr/."
+        fi
+    else
+        emit_warning "fixable" "ADR record directory is missing" \
+            "The workspace ADR index requires docs/design-decisions/adr/." \
+            "Create docs/design-decisions/adr/ and migrate decisions into numbered records."
+    fi
+
+    if [ -f "docs/design-decisions/README.md" ] \
+        && ! grep -qE '^\| \[?[0-9]{4}\]?\(?(adr/|.*adr/)' "docs/design-decisions/README.md"; then
+        emit_warning "fixable" "ADR index has no numbered record rows" \
+            "The ADR index must expose ID, status, tags, and one-line outcome for each decision." \
+            "Add linked numbered ADR rows to docs/design-decisions/README.md."
+    fi
+
+    if [ -f "docs/lessons.md" ]; then
+        local lesson_count
+        lesson_count=$(grep -c '^## ' "docs/lessons.md" || true)
+        if [ "$lesson_count" -gt 10 ]; then
+            emit_warning "fixable" "Active exceptions register has ${lesson_count} entries" \
+                "docs/lessons.md is capped at ten unresolved recurring risks." \
+                "Promote resolved rules to canonical docs and remove their exception entries."
+        fi
+        local malformed_exceptions
+        malformed_exceptions=$(awk '
+            /^## / {
+                if (active && (!remediation || !trigger)) bad++
+                active = 1
+                remediation = 0
+                trigger = 0
+                next
+            }
+            /^Canonical remediation:/ { remediation = 1 }
+            /^Review trigger:/ { trigger = 1 }
+            END {
+                if (active && (!remediation || !trigger)) bad++
+                print bad + 0
+            }
+        ' "docs/lessons.md")
+        if [ "$malformed_exceptions" -gt 0 ]; then
+            emit_warning "fixable" "${malformed_exceptions} active exception entries lack required metadata" \
+                "Each unresolved recurring risk must include canonical remediation and a review trigger." \
+                "Add 'Canonical remediation: <link>' and 'Review trigger: <condition>' to every active exception."
+        fi
+    fi
+}
+
 # Run checks
-check_issue_lifecycle
 check_docs_change_hint
 check_branch_naming
 check_exec_plan_existence
@@ -787,6 +821,7 @@ check_workflow_doc_startup_commands
 check_linked_issue_resolution
 check_linked_github_issue_closure
 check_active_workflow_file_naming
+check_workflow_context_contract
 
 # Summary
 if [ "$WARN_COUNT" -gt 0 ]; then
