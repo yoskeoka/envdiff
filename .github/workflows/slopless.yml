@@ -5,6 +5,7 @@ name: Slopless
     branches: [main]
     paths:
       - "**/*.md"
+      - "!docs/exec-plan/**"
       - ".github/workflows/slopless.yml"
 
 jobs:
@@ -78,6 +79,9 @@ jobs:
               [ -n "$path" ] || continue
               [ -f "$path" ] || continue
               case "$path" in
+                docs/exec-plan/*)
+                  continue
+                  ;;
                 *.md)
                   contains_japanese_text "$path" && continue
                   printf '%s\n' "$path"
